@@ -1,0 +1,195 @@
+# **Practical Machine Learning Course Project**
+#### *John Joseph R. Naputo*
+#### *August 5, 2019*
+
+### **Background**
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+### **Data**
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+### **Loading the necessary packages**
+```{r, warning = FALSE, message = FALSE}
+library(dplyr)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+library(rattle)
+library(randomForest)
+library(corrplot)
+library(gbm)
+```
+
+### **Downloading the Data from the Web**
+```{r}
+# Traning dataset
+# Downloading the data from the web
+if(!file.exists("./data")){dir.create("./data")}
+training_fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(training_fileUrl, destfile = "./data/pml-training.csv")
+
+# Testing dataset
+# Downloading the data from the web
+if(!file.exists("./data")){dir.create("./data")}
+testing_fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(testing_fileUrl, destfile = "./data/pml-testing.csv")
+```
+
+### **Loading the dataset**
+```{r}
+train <- read.csv("./data/pml-training.csv", header = TRUE, 
+                  na.strings = c("NA","",'#DIV/0!'))
+test <- read.csv("./data/pml-testing.csv", header = TRUE, 
+                 na.strings = c("NA","",'#DIV/0!'))
+```
+
+### **Data Quality Score**
+The quality of the data was checked, whether there are missing value for each column.
+```{r, results = "hide"}
+# Data Quality Score Function
+DataQualityScore <- function(raw_data) {
+        
+        df.QualityScore <- setNames(data.frame(matrix(ncol = 6, nrow = 0)), c("VARIABLE", "NULL", "INVALID",
+                                                                              "TOTAL ERROR", "SAMPLE SIZE",
+                                                                              "DATA QUALITY SCORE"))
+        
+        for (index in 1:ncol(raw_data)) {
+                null <-  is.na(raw_data[,index])
+                invalid <- !is.finite(raw_data[,index])
+    
+        for (i in 1:nrow(raw_data)) {
+                if (null[i] == TRUE){
+                        invalid[i] <- FALSE
+                } else {
+                        invalid[i] <- invalid[i]
+                }
+                }
+                
+        TotalNull <- sum(null)
+        TotalInvalid <- sum(invalid)
+    
+        df.QualityScore[index,1] <- colnames(raw_data)[index]
+        df.QualityScore[index,2] <- TotalNull
+        df.QualityScore[index,3] <- TotalInvalid
+        df.QualityScore[index,4] <- sum(TotalNull, TotalInvalid)
+        df.QualityScore[index,5] <- nrow(raw_data)
+        df.QualityScore[index,6] <- paste(100 - ((df.QualityScore[index,4]/df.QualityScore[index,5]) * 100),
+                                          "%")
+        }
+        
+        df.QualityScore
+}
+```
+
+### **Data Cleaning**
+Columns with missing values are removed. Columns 1 to 7 are also dropped as they are unnecessary for the data modeling.
+```{r}
+#Data Cleaning Function
+DataCleaning <- function(x){
+        Score <- DataQualityScore(x)
+        scoreData <- data.frame(variable = Score[,'VARIABLE'], 
+                                score = as.numeric(substr(Score[,'DATA QUALITY SCORE'], 
+                                                          1, nchar(Score[,'DATA QUALITY SCORE'])-1)))
+        scoreData[which(scoreData$score != 100),]
+        #length(train[,as.character(scoreData[which(scoreData$score != 50),][[1]])])
+        data_scored <- x[,as.character(scoreData[which(scoreData$score != 100),][[1]])]
+        
+        remainedCols <- names(x)[-which(names(x) %in% names(data_scored))]
+        cleanedData = x[remainedCols]
+        Score1 <- DataQualityScore(cleanedData)
+        #returnDataset <- list(Score,Score1,data_scored,removedCols)
+        return(cleanedData)
+}
+
+# Data Cleaning
+train <- DataCleaning(train)
+test <- DataCleaning(test)
+
+# Removing unnecessary columns
+train <- train[-c(1:7)]
+test <- test[-c(1:7)]
+```
+
+### **Data Preprocessing**
+The train data was split into train and validate with 70:30 ratio.
+```{r}
+# Data Splitting
+set.seed(123)
+inTrain <- createDataPartition(train$classe, p = 0.7, list = FALSE)
+train <- train[inTrain, ]
+validate <- train[-inTrain, ]
+
+cor_mat <- cor(train[, -53])
+corrplot(cor_mat, order = "FPC", method = "color", type = "upper",
+         tl.cex = 0.8, tl.col = rgb(0, 0, 0))
+
+highlyCorrelated = findCorrelation(cor_mat, cutoff=0.7)
+
+names(train)[highlyCorrelated]
+```
+
+### **Model Building**
+For this project we will use the following algorithms to predict the outcome.
+
+1. Decision Tree
+2. Random Forest
+3. Gradient Boosting Classifier
+
+#### **Decision Tree**
+```{r}
+set.seed(123)
+model_decisiontree <- rpart(classe ~ ., data=train, method="class")
+fancyRpartPlot(model_decisiontree)
+
+# Validate
+predictTreeMod1 <- predict(model_decisiontree, validate, type = "class")
+cmtree <- confusionMatrix(predictTreeMod1, validate$classe)
+cmtree
+```
+
+#### **Random Forest**
+```{r}
+set.seed(123)
+controlRF <- trainControl(method="cv", number=3, verboseIter=FALSE)
+model_randomforest <- train(classe ~ ., data= train, method="rf", trControl=controlRF)
+model_randomforest$finalModel
+
+#Validate
+
+pred_rfc <- predict(model_randomforest, newdata = validate)
+cm_randomforest <- confusionMatrix(pred_rfc, validate$classe)
+cm_randomforest
+```
+
+#### **Gradient Boosting Classifier**
+```{r}
+set.seed(123)
+controlGBM <- trainControl(method = "repeatedcv", number = 5, repeats = 1)
+model_gbm  <- train(classe ~ ., data=train, method = "gbm", trControl = controlGBM, verbose = FALSE)
+model_gbm$finalModel
+
+# print model summary
+print(model_gbm)
+
+#Validate
+
+pred_gbm <- predict(model_gbm, newdata = validate)
+cm_gbm <- confusionMatrix(pred_gbm, validate$classe)
+cm_gbm
+```
+
+### **Champion Model**
+Gradient Boosting Classifier yields the best results, thus it will be used for the test dataset.
+```{r}
+Results <- predict(model_gbm, newdata = test)
+Results
+```
